@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>서울 핫플 통합 추천 (이원화 엔진)</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; display: flex; font-family: 'Malgun Gothic', sans-serif; height: 100vh; background-color: #f4f7f6; }
+        #sidebar { width: 420px; overflow-y: auto; border-right: 1px solid #ddd; background: white; display: flex; flex-direction: column; z-index: 1000; }
+        .header { padding: 20px; background: #2c3e50; color: white; text-align: center; }
+        .input-section { padding: 15px; background: #ecf0f1; border-bottom: 1px solid #ccc; }
+        .input-group { margin-bottom: 10px; }
+        select, button { width: 100%; padding: 10px; border-radius: 5px; border: 1px solid #bdc3c7; }
+        button { background: #3498db; color: white; font-weight: bold; cursor: pointer; margin-top: 5px; border: none; }
+        #list-container { flex: 1; overflow-y: auto; }
+        .place-item { padding: 15px; border-bottom: 1px solid #eee; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+        .score-badge { padding: 5px 10px; border-radius: 12px; font-weight: bold; font-size: 0.85rem; }
+        .badge-user { background: #e74c3c; color: white; } /* 명소 엔진 */
+        .badge-friend { background: #2ecc71; color: white; } /* 역 엔진 */
+        #map { flex: 1; }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <div class="header"><h3>🏙️ 서울 통합 추천 시스템</h3></div>
+        <div class="input-section">
+            <div class="input-group"><label>연령대</label><select id="age"><option value="10">10대</option><option value="20">20대</option><option value="30" selected>30대</option><option value="40">40대</option><option value="50">50대 이상</option></select></div>
+            <div class="input-group"><label>성별</label><select id="gender"><option value="남성">남성</option><option value="여성">여성</option></select></div>
+            <div class="input-group"><label>테마</label><select id="theme"><option value="힐링">힐링</option><option value="관광">관광</option><option value="맛집">맛집</option><option value="데이트">데이트</option></select></div>
+            <button onclick="runIntegratedRecommendation()" id="run-btn">통합 추천 시작</button>
+        </div>
+        <div id="list-container"></div>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // 1. 각각의 API 키 설정
+        const MY_KEY = '4f656a67526d696e393151786b5675'; // 사용자님 키
+        const FRIEND_KEY = '54614f4d7873626a35396d66704f50'; // 친구분 키
+
+        // 2. 지역 리스트 분리[cite: 5]
+        const MY_PLACES = ["강남 MICE 관광특구", "동대문 관광특구", "명동 관광특구", "이태원 관광특구", "잠실 관광특구", "종로·청계 관광특구", "홍대 관광특구", "경복궁", "성수카페거리", "여의도한강공원", "올림픽공원"]; 
+        const FRIEND_PLACES = ["강남역", "홍대입구역(2호선)", "사당역", "건대입구역", "서울역", "용산역"];
+
+        const map = L.map('map').setView([37.5665, 126.9780], 11);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+        let markers = [];
+
+        // 3. 엔진 A: 사용자님 날씨 기반 로직[cite: 5]
+        async function getMyScore(area, age, gender) {
+            const url = `http://openapi.seoul.go.kr:8088/${MY_KEY}/json/citydata/1/1/${area}`;
+            const res = await fetch(url); const data = await res.json();
+            const ppl = data.CITYDATA.LIVE_PPLTN_STTS[0];
+            const weather = data.CITYDATA.WEATHER_STTS[0];
+            
+            let score = (ppl.NON_RESNT_PPLTN_RATE * 0.4 + ppl[`PPLTN_RATE_${age}`] * 0.3 + (gender === '남성' ? ppl.MALE_PPLTN_RATE : ppl.FEMALE_PPLTN_RATE) * 0.2);
+            if (ppl.AREA_CONGEST_LVL.includes('붐빔')) score -= 20;
+            if (weather.PCP_MSG.includes('비')) score = 0; // 날씨 페널티[cite: 5]
+            return { name: area, score: score.toFixed(2), type: '명소', engine: 'user' };
+        }
+
+        // 4. 엔진 B: 친구분 가중치 기반 로직[cite: 5]
+        async function getFriendScore(area, theme) {
+            const url = `http://openapi.seoul.go.kr:8088/${FRIEND_KEY}/json/citydata/1/1/${area}`;
+            const res = await fetch(url); const data = await res.json();
+            const ppl = data.CITYDATA.LIVE_PPLTN_STTS[0];
+            
+            // 친구 가중치 로직 예시 (데이트/관광 등)[cite: 5]
+            let score = (ppl.AREA_PPLTN_MAX / 1000); 
+            if (theme === '데이트') score += 10;
+            return { name: area, score: score.toFixed(2), type: '역세권', engine: 'friend' };
+        }
+
+        async function runIntegratedRecommendation() {
+            const age = document.getElementById('age').value;
+            const gender = document.getElementById('gender').value;
+            const theme = document.getElementById('theme').value;
+            
+            // 각자의 엔진 가동
+            const myResults = await Promise.all(MY_PLACES.map(p => getMyScore(p, age, gender)));
+            const friendResults = await Promise.all(FRIEND_PLACES.map(p => getFriendScore(p, theme)));
+            
+            // 마지막에만 합치기
+            const finalResults = [...myResults, ...friendResults].sort((a, b) => b.score - a.score);
+            renderUI(finalResults);
+        }
+
+        function renderUI(data) {
+            const container = document.getElementById('list-container');
+            container.innerHTML = ''; markers.forEach(m => map.removeLayer(m));
+            data.forEach((item, index) => {
+                const el = document.createElement('div');
+                el.className = 'place-item';
+                el.innerHTML = `<div><strong>${item.name}</strong><br><small>${item.type}</small></div>
+                                <div class="score-badge badge-${item.engine}">${item.score}점</div>`;
+                container.appendChild(el);
+            });
+        }
+    </script>
+</body>
+</html>
