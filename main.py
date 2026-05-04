@@ -99,11 +99,14 @@ def calculate_friend_score(row):
     return round(max(0, score), 2)
 
 # ✅ 5. API 엔드포인트
+# ✅ 5. API 엔드포인트
 @app.get("/recommend")
 async def recommend(theme: str, age: str, gender: str):
-    key_info = src.mylib.getKey(os.path.join(os.getcwd(), 'src', 'key.properties'))
-    SEOUL_KEY = key_info['dataseoul']
-    client = OpenAI(api_key=key_info['openai_api_key'])
+    # --- 수정된 부분: 환경 변수에서 직접 키를 가져옴 ---
+    SEOUL_KEY = os.environ.get('dataseoul')
+    openai_key = os.environ.get('openai_api_key')
+    client = OpenAI(api_key=openai_key)
+    # ----------------------------------------------
     
     age_col = {"10대": "PPLTN_RATE_10", "20대": "PPLTN_RATE_20", "30대": "PPLTN_RATE_30", "40대": "PPLTN_RATE_40"}.get(age, "PPLTN_RATE_20")
 
