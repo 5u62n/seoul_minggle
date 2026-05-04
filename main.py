@@ -101,19 +101,31 @@ def calculate_friend_score(row):
 # ✅ 5. API 엔드포인트
 @app.get("/recommend")
 async def recommend(theme: str, age: str, gender: str):
-    # --- 수정된 부분: 환경 변수에서 직접 키를 가져옴 ---
+    # 1. 환경 변수에서 키 가져오기 (정상)
     SEOUL_KEY = os.environ.get('dataseoul')
     openai_key = os.environ.get('openai_api_key')
+    
+    # 2. 키가 없을 경우를 대비한 방어 로직
+    if not SEOUL_KEY or not openai_key:
+        return {"error": "API 키 설정이 누락되었습니다. Render의 Environment 설정을 확인하세요."}
+    
     client = OpenAI(api_key=openai_key)
-    # ----------------------------------------------
     
     age_col = {"10대": "PPLTN_RATE_10", "20대": "PPLTN_RATE_20", "30대": "PPLTN_RATE_30", "40대": "PPLTN_RATE_40"}.get(age, "PPLTN_RATE_20")
 
-    # 역 데이터 수집 및 사용자 로직 적용
+    # 3. 데이터 수집 및 예외 처리 (매우 중요)
     station_data = [fetch_seoul_data(SEOUL_KEY, s_name) for s_name in STATION_LIST]
-    df_stations = pd.DataFrame([r for r in station_data if r])
+    valid_data = [r for r in station_data if r]
+    
+    # 데이터가 하나도 수집되지 않았을 경우 에러 방지
+    if not valid_data:
+        return {"error": "서울시 데이터 수집에 실패했습니다. API 키나 네트워크를 확인하세요."}
+        
+    df_stations = pd.DataFrame(valid_data)
     df_stations['FINAL_SCORE'] = df_stations.apply(lambda r: calculate_user_score(r, age_col), axis=1)
     top_3_stations = df_stations.sort_values('FINAL_SCORE', ascending=False).head(3)
+    
+    # ... 이후 AI 요약 부분에 아까 드린 try-except 구문을 적용하세요.
 
     # 장소 데이터 수집 및 친구 로직 적용
     place_data = [fetch_seoul_data(SEOUL_KEY, p_name) for p_name in PLACE_LIST]
@@ -124,16 +136,25 @@ async def recommend(theme: str, age: str, gender: str):
     # 결과 합치기 (역 3 + 장소 3)
     final_result = pd.concat([top_3_stations, top_3_places])
 
-    # ✅ AI 요약 1: 역 1위 (첫 번째 데이터)
-    top_station = top_3_stations.iloc[0]
-    prompt_s = f"{age} {gender}에게 '{theme}'를 위한 역 추천 1위 '{top_station['AREA_NM']}'의 추천 이유를 2줄로 써줘."
-    res_s = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_s}])
-    
-    # ✅ AI 요약 2: 장소 1위 (네 번째 데이터 - index 3)
-    top_place = top_3_places.iloc[0]
-    prompt_p = f"{age} {gender}에게 '{theme}'를 위한 장소 추천 1위 '{top_place['AREA_NM']}'의 추천 이유를 2줄로 써줘."
-    res_p = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_p}])
+    # ✅ AI 요약 1: 역 추천 이유
+    try:
+        top_station = top_3_stations.iloc[0]
+        prompt_s = f"{age} {gender}에게 '{theme}'를 위한 역 추천 1위 '{top_station['AREA_NM']}'의 추천 이유를 2줄로 써줘."
+        res_s = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_s}])
+        station_summary = res_s.choices[0].message.content
+    except Exception as e:
+        print(f"AI Station Summary Error: {e}")
+        station_summary = "역 추천 요약을 가져오지 못했습니다. (API 키 또는 연결 확인 필요)"
 
+    # ✅ AI 요약 2: 장소 추천 이유
+    try:
+        top_place = top_3_places.iloc[0]
+        prompt_p = f"{age} {gender}에게 '{theme}'를 위한 장소 추천 1위 '{top_place['AREA_NM']}'의 추천 이유를 2줄로 써줘."
+        res_p = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_p}])
+        place_summary = res_p.choices[0].message.content
+    except Exception as e:
+        print(f"AI Place Summary Error: {e}")
+        place_summary = "장소 추천 요약을 가져오지 못했습니다. (API 키 또는 연결 확인 필요)"
     return {
         "top_station_summary": res_s.choices[0].message.content,
         "top_place_summary": res_p.choices[0].message.content,
