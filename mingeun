@@ -1,0 +1,164 @@
+import requests
+import pandas as pd
+from datetime import datetime, timezone, timedelta
+
+
+# 1. 서울 시간(KST) 설정 (UTC+9)
+KST = timezone(timedelta(hours=9))
+
+# API 및 지역 설정
+API_KEY = '4f656a67526d696e393151786b5675'
+AREA_LIST = ["강남 MICE 관광특구", "동대문 관광특구", "명동 관광특구", "이태원 관광특구", "잠실 관광특구", "종로·청계 관광특구", "홍대 관광특구",
+             "경복궁", "광화문·덕수궁", "창덕궁·종묘", "가로수길", "노량진", "덕수궁길·정동길", "북촌한옥마을", "서촌", "성수카페거리",
+             "압구정로데오거리", "여의도", "연남동", "영등포 타임스퀘어", "용리단길", "인사동", "해방촌·경리단길", "DDP(동대문디자인플라자)",
+             "광화문광장", "국립중앙박물관·용산가족공원", "남산공원", "노들섬", "뚝섬한강공원", "망원한강공원", "반포한강공원",
+             "서울숲공원", "어린이대공원", "여의도한강공원", "잠실종합운동장", "북창동 먹자골목", "남대문시장", "익선동", "송리단길·호수단길", "올림픽공원"]
+
+
+
+# fetch_seoul_data 함수 내부
+def fetch_seoul_data():
+    current_rows = []
+    # KST 및 AREA_LIST, API_KEY는 외부에서 정의되었다고 가정합니다.
+    collect_time = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+
+    for area in AREA_LIST:
+        url = f'http://openapi.seoul.go.kr:8088/{API_KEY}/json/citydata/1/5/{area}'
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                root = data.get('CITYDATA')
+
+                # root가 None이면 해당 지역 스킵
+                if not root:
+                    continue
+
+                # 리스트 형태 데이터 안전 추출 (데이터가 없으면 빈 리스트 반환)
+                ppl_list = root.get('LIVE_PPLTN_STTS', [])
+                ppl = ppl_list[0] if isinstance(ppl_list, list) and ppl_list else {}
+
+                weather_list = root.get('WEATHER_STTS', [])
+                weather = weather_list[0] if isinstance(weather_list, list) and weather_list else {}
+
+                # 도로 소통 정보 안전 추출
+                avg_road = root.get('AVG_ROAD_DATA')
+                road_data = {}
+                if isinstance(avg_road, dict):
+                    road_list = avg_road.get('ROAD_TRAFFIC_STTS', [])
+                    if isinstance(road_list, list) and road_list:
+                        road_data = road_list[0]
+
+                events = root.get('EVENT_STTS', [])
+                if not isinstance(events, list):
+                    events = []
+
+                # 대중교통 데이터 안전 추출
+                sub_list = root.get('LIVE_SUB_PPLTN', [])
+                bus_list = root.get('LIVE_BUS_PPLTN', [])
+
+                row = {
+                    'AREA_NM': area,
+                    'AREA_CD': root.get('AREA_CD', ''),
+                    'COLLECT_TIME': collect_time,
+                    'PPLTN_TIME': ppl.get('PPLTN_TIME', ''),
+                    'AREA_CONGEST_LVL': ppl.get('AREA_CONGEST_LVL', ''),
+                    'AREA_CONGEST_MSG': ppl.get('AREA_CONGEST_MSG', ''),
+                    'AREA_PPLTN_MIN': ppl.get('AREA_PPLTN_MIN', ''),
+                    'AREA_PPLTN_MAX': ppl.get('AREA_PPLTN_MAX', ''),
+                    'MALE_PPLTN_RATE': ppl.get('MALE_PPLTN_RATE', ''),
+                    'FEMALE_PPLTN_RATE': ppl.get('FEMALE_PPLTN_RATE', ''),
+                    'PPLTN_RATE_0': ppl.get('PPLTN_RATE_0', ''),
+                    'PPLTN_RATE_10': ppl.get('PPLTN_RATE_10', ''),
+                    'PPLTN_RATE_20': ppl.get('PPLTN_RATE_20', ''),
+                    'PPLTN_RATE_30': ppl.get('PPLTN_RATE_30', ''),
+                    'PPLTN_RATE_40': ppl.get('PPLTN_RATE_40', ''),
+                    'PPLTN_RATE_50': ppl.get('PPLTN_RATE_50', ''),
+                    'PPLTN_RATE_60': ppl.get('PPLTN_RATE_60', ''),
+                    'PPLTN_RATE_70': ppl.get('PPLTN_RATE_70', ''),
+                    'RESNT_PPLTN_RATE': ppl.get('RESNT_PPLTN_RATE', ''),
+                    'NON_RESNT_PPLTN_RATE': ppl.get('NON_RESNT_PPLTN_RATE', ''),
+                    'TEMP': weather.get('TEMP', ''),
+                    'PM10': weather.get('PM10', ''),
+                    'ROAD_PRCES_STTS': road_data.get('ROAD_PRCES_STTS', '정보없음'),
+                    'EVENT_NM': ", ".join([str(e.get('EVENT_NM', '')) for e in events if isinstance(e, dict)]) if events else "없음",
+
+                    'LIVE_SUB_PPLTN': ", ".join([
+                        f"{s.get('SUB_STN_NM', '')}({s.get('SUB_STN_LINE', '')}): {s.get('SUB_STN_CONGEST_LVL', '정보없음')}"
+                        for s in sub_list if isinstance(s, dict)
+                    ]) if isinstance(sub_list, list) and sub_list else "없음",
+
+                    'LIVE_BUS_PPLTN': ", ".join([
+                        f"{b.get('BUS_STN_NM', '')}: {b.get('BUS_STN_CONGEST_LVL', '정보없음')}"
+                        for b in bus_list if isinstance(b, dict)
+                    ]) if isinstance(bus_list, list) and bus_list else "없음"
+                }
+                current_rows.append(row)
+        except Exception as e:
+            print(f"Error processing area {area}: {e}")
+            continue
+
+    return current_rows
+
+# 메인 실행부 (들여쓰기 수정)
+if __name__ == "__main__":
+    now_kst = datetime.now(KST)
+    batch_data = fetch_seoul_data()
+
+    if batch_data:
+        df = pd.DataFrame(batch_data)
+        filename = now_kst.strftime('%m%d_%H%M') + '.csv'
+        # utf-8-sig로 저장해야 한글이 깨지지 않습니다.
+        df.to_csv(filename, index=False, encoding='utf-8-sig')
+        print(f"✅ 서울 시간 기준 수집 완료: {filename}")
+    else:
+        print("❌ 수집된 데이터가 없습니다.")
+
+
+import pandas as pd
+import json
+
+# 1. 파일 로드
+df = pd.read_csv('0501_1226.csv')
+
+# 2. 장소 분류 (비서가 직접 분류한 데이터)
+PLACE_TYPES = {
+    "실외": ["경복궁", "광화문광장", "남산공원", "노들섬", "뚝섬한강공원", "망원한강공원", "반포한강공원", "서울숲공원", "어린이대공원", "여의도한강공원", "올림픽공원", "덕수궁길·정동길", "북촌한옥마을", "창덕궁·종묘"],
+    "복합": ["강남 MICE 관광특구", "동대문 관광특구", "명동 관광특구", "이태원 관광특구", "잠실 관광특구", "홍대 관광특구", "가로수길", "성수카페거리", "압구정로데오거리", "용리단길", "인사동", "해방촌·경리단길", "익선동", "송리단길·호수단길", "서촌"],
+    "실내": ["노량진", "영등포 타임스퀘어", "DDP(동대문디자인플라자)", "국립중앙박물관·용산가족공원", "북창동 먹자골목", "남대문시장", "광화문·덕수궁", "연남동", "잠실종합운동장", "여의도"]
+}
+TYPE_MAP = {name: t for t, names in PLACE_TYPES.items()}
+
+def calculate_final_auto_score(row):
+    # [A] 기본 인구 점수 (비상주 0.4 / 30대 0.3 / 남성 0.2)
+    score = (row['NON_RESNT_PPLTN_RATE'] * 0.4 + row['PPLTN_RATE_30'] * 0.3 + row['MALE_PPLTN_RATE'] * 0.2)
+
+    # [B] 혼잡도 페널티
+    congest = row['AREA_CONGEST_LVL']
+    if congest == '약간 붐빔': score -= 15
+    elif congest == '붐빔': score -= 25
+    elif congest == '매우 붐빔': score -= 50
+
+    # [C] 날씨 자동 감지 (PM10, 강수 메시지 활용)
+    pm10 = float(row.get('PM10', 0))
+    weather_msg = str(row.get('AREA_CONGEST_MSG', ''))
+    is_raining_or_snowing = '비' in weather_msg or '눈' in weather_msg
+    
+    p_type = TYPE_MAP.get(row['AREA_NM'], "복합")
+
+    # [D] 날씨 가중치 자동 적용
+    if is_raining_or_snowing:
+        if p_type == "실외": score = 0
+        elif p_type == "복합": score *= 0.2 # 80% 감점
+    elif pm10 >= 80:
+        if p_type == "실외": score -= 20
+        elif p_type == "복합": score -= 10
+
+    return round(max(0, score), 2)
+
+# 3. 적용 및 저장
+df['score'] = df.apply(calculate_final_auto_score, axis=1)
+final_result = df.sort_values(by='score', ascending=False)[['AREA_NM', 'score', 'AREA_CONGEST_LVL']].to_dict(orient='records')
+
+with open('recommend_auto_weather.json', 'w', encoding='utf-8') as f:
+    json.dump(final_result, f, indent=4, ensure_ascii=False)
