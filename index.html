@@ -470,7 +470,7 @@
 
     try {
       // ✅ 1. 백엔드 주소를 실제 주소로 수정 (여기가 YOUR_BACKEND_URL이면 오류 납니다)
-      const BASE_URL = 'http://127.0.0.1:8000'; 
+      const BASE_URL = 'https://seoul-minggle-9oyt.onrender.com'; 
       const res  = await fetch(`${BASE_URL}/recommend?theme=${encodeURIComponent(theme)}&age=${encodeURIComponent(age)}&gender=${encodeURIComponent(gender)}`);
       const data = await res.json();
 
