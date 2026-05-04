@@ -1,0 +1,100 @@
+import os
+import requests
+import pandas as pd
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timezone, timedelta
+
+app = FastAPI()
+
+# 프론트엔드 연동을 위한 CORS 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- 1. 설정 및 API 키 (이원화) ---
+KST = timezone(timedelta(hours=9))
+MY_API_KEY = '4f656a67526d696e393151786b5675'      # 사용자님 키[cite: 5]
+FRIEND_API_KEY = '54614f4d7873626a35396d66704f50'  # 친구분 키[cite: 5]
+
+# 장소 분류 (사용자님 엔진 전용)
+PLACE_TYPES = {
+    "실외": ["경복궁", "광화문광장", "남산공원", "노들섬", "뚝섬한강공원", "망원한강공원", "반포한강공원", "서울숲공원", "어린이대공원", "여의도한강공원", "올림픽공원", "덕수궁길·정동길", "북촌한옥마을", "창덕궁·종묘"],
+    "복합": ["강남 MICE 관광특구", "동대문 관광특구", "명동 관광특구", "이태원 관광특구", "잠실 관광특구", "종로·청계 관광특구", "홍대 관광특구", "가로수길", "성수카페거리", "압구정로데오거리", "용리단길", "인사동", "해방촌·경리단길", "익선동", "송리단길·호수단길", "서촌"],
+    "실내": ["노량진", "영등포 타임스퀘어", "DDP(동대문디자인플라자)", "국립중앙박물관·용산가족공원", "북창동 먹자골목", "남대문시장", "광화문·덕수궁", "연남동", "잠실종합운동장", "여의도"]
+}
+TYPE_MAP = {name: t for t, names in PLACE_TYPES.items()}
+
+# --- 2. [엔진 A] 사용자님 : 날씨 자동 감지 및 명소 점수화 ---
+def calculate_user_engine_score(area_nm, age_val, gender_val):
+    url = f'http://openapi.seoul.go.kr:8088/{MY_API_KEY}/json/citydata/1/1/{area_nm}'
+    try:
+        data = requests.get(url).json().get('CITYDATA')
+        if not data: return None
+        
+        ppl = data['LIVE_PPLTN_STTS'][0]
+        weather = data['WEATHER_STTS'][0]
+        
+        # [기본 점수] 비상주(0.4) + 해당연령(0.3) + 성별(0.2)
+        age_col = f'PPLTN_RATE_{age_val}'
+        gender_col = 'MALE_PPLTN_RATE' if gender_val == '남성' else 'FEMALE_PPLTN_RATE'
+        
+        score = (float(ppl['NON_RESNT_PPLTN_RATE']) * 0.4 + 
+                 float(ppl.get(age_col, 0)) * 0.3 + 
+                 float(ppl.get(gender_col, 0)) * 0.2)
+
+        # [날씨/미세먼지 페널티] 사용자님 고유 로직[cite: 5]
+        pm10 = float(weather.get('PM10', 0))
+        is_bad_weather = '비' in ppl['AREA_CONGEST_MSG'] or '눈' in ppl['AREA_CONGEST_MSG']
+        p_type = TYPE_MAP.get(area_nm, "복합")
+
+        if is_bad_weather:
+            score = 0 if p_type == "실외" else score * 0.2
+        elif pm10 >= 80:
+            score -= (20 if p_type == "실외" else 10)
+
+        return {"name": area_nm, "score": round(max(0, score), 2), "engine": "user"}
+    except: return None
+
+# --- 3. [엔진 B] 친구분 : 테마 가중치 및 역 점수화 ---
+def calculate_friend_engine_score(area_nm, theme_val):
+    url = f'http://openapi.seoul.go.kr:8088/{FRIEND_API_KEY}/json/citydata/1/1/{area_nm}'
+    try:
+        data = requests.get(url).json().get('CITYDATA')
+        if not data: return None
+        
+        ppl = data['LIVE_PPLTN_STTS'][0]
+        
+        # [기본 점수] 친구분 고유 가중치 로직 예시[cite: 5]
+        score = float(ppl['AREA_PPLTN_MAX']) / 1000
+        if theme_val == "데이트": score += 10
+        elif theme_val == "힐링": score -= (20 if ppl['AREA_CONGEST_LVL'] == '붐빔' else 0)
+
+        return {"name": area_nm, "score": round(score, 2), "engine": "friend"}
+    except: return None
+
+# --- 4. 통합 API 엔드포인트 ---
+@app.get("/recommend")
+async def get_integrated_recommendation(theme: str, age: str, gender: str):
+    # 각자 담당하는 지역 리스트
+    MY_AREA_LIST = list(TYPE_MAP.keys())
+    FRIEND_AREA_LIST = ['강남역', '홍대입구역(2호선)', '서울역', '용산역', '사당역'] # 예시 역 리스트[cite: 5]
+    
+    # 1. 사용자 엔진 가동 (관광/명소)
+    user_results = [calculate_user_engine_score(area, age, gender) for area in MY_AREA_LIST]
+    
+    # 2. 친구 엔진 가동 (역세권)
+    friend_results = [calculate_friend_engine_score(area, theme) for area in FRIEND_AREA_LIST]
+    
+    # 3. 데이터 결합 및 정렬
+    combined = [r for r in (user_results + friend_results) if r]
+    final_sorted = sorted(combined, key=lambda x: x['score'], reverse=True)
+    
+    return {
+        "update_time": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
+        "recommendations": final_sorted[:10]  # 상위 10개 반환
+    }
