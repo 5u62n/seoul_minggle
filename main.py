@@ -1,160 +1,24 @@
 import os
-import urllib.parse
-import urllib.request
-import xml.etree.ElementTree as ET
+import requests
 import pandas as pd
 from fastapi import FastAPI
-import src.mylib
-from openai import OpenAI
 from fastapi.middleware.cors import CORSMiddleware
+from openai import OpenAI
+import src.mylib
 
 app = FastAPI()
 
-#프론트엔드 연동용
+# ✅ 1. CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # 모든 도메인에서의 접근을 허용합니다
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- 데이터 수집 및 유틸리티 함수 ---
-def buildUrl(key, type_, service, start, end, area_nm=''):
-    _url = 'http://openAPI.seoul.go.kr:8088/'
-    area_nm_encoded = urllib.parse.quote(area_nm)
-    params = '/'.join([key, type_, service, str(start), str(end), '', '', area_nm_encoded])
-    return urllib.parse.urljoin(_url, params)
-
-def fetchAreaData(key, area_nm):
-    """단일 지역 데이터 수집 (XML 파싱)"""
-    url = buildUrl(key, 'xml', 'citydata', 1, 1, area_nm)
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            xml_data = response.read()
-        root = ET.fromstring(xml_data)
-        citydata = root.find('.//CITYDATA')
-        ppltn = citydata.find('LIVE_PPLTN_STTS/LIVE_PPLTN_STTS') if citydata is not None else None
-        
-        if ppltn is None: return None
-
-        def getText(node, tag):
-            el = node.find(tag)
-            return el.text if el is not None and el.text else '0'
-
-        record = {
-            'AREA_NM': getText(citydata, 'AREA_NM'),
-            'AREA_CONGEST_LVL': getText(ppltn, 'AREA_CONGEST_LVL'),
-            'AREA_PPLTN_MIN': float(getText(ppltn, 'AREA_PPLTN_MIN')),
-            'AREA_PPLTN_MAX': float(getText(ppltn, 'AREA_PPLTN_MAX')),
-            'MALE_PPLTN_RATE': float(getText(ppltn, 'MALE_PPLTN_RATE')),
-            'FEMALE_PPLTN_RATE': float(getText(ppltn, 'FEMALE_PPLTN_RATE')),
-            'NON_RESNT_PPLTN_RATE': float(getText(ppltn, 'NON_RESNT_PPLTN_RATE')),
-            'PPLTN_RATE_0': float(getText(ppltn, 'PPLTN_RATE_0')),
-            'PPLTN_RATE_10': float(getText(ppltn, 'PPLTN_RATE_10')),
-            'PPLTN_RATE_20': float(getText(ppltn, 'PPLTN_RATE_20')),
-            'PPLTN_RATE_30': float(getText(ppltn, 'PPLTN_RATE_30')),
-            'PPLTN_RATE_40': float(getText(ppltn, 'PPLTN_RATE_40')),
-            'PPLTN_RATE_50': float(getText(ppltn, 'PPLTN_RATE_50')),
-            'PPLTN_RATE_60': float(getText(ppltn, 'PPLTN_RATE_60')),
-            'PPLTN_RATE_70': float(getText(ppltn, 'PPLTN_RATE_70')),
-        }
-        
-        # 하차 인원 합계 계산 (지하철 + 버스)
-        sub = citydata.find('LIVE_SUB_PPLTN')
-        bus = citydata.find('LIVE_BUS_PPLTN')
-        sub_off = (float(getText(sub, 'SUB_30WTHN_GTOFF_PPLTN_MIN')) + float(getText(sub, 'SUB_30WTHN_GTOFF_PPLTN_MAX'))) / 2 if sub is not None else 0
-        bus_off = (float(getText(bus, 'BUS_30WTHN_GTOFF_PPLTN_MIN')) + float(getText(bus, 'BUS_30WTHN_GTOFF_PPLTN_MAX'))) / 2 if bus is not None else 0
-        record['GTOFF_AVG'] = sub_off + bus_off
-        
-        return record
-    except Exception as e:
-        return None
-
-# --- 가중치 설정 ---
-THEME_WEIGHTS = {
-    "관광": {"non_res": 0.6, "ppltn": 0.3, "congest": -0.1, "gtoff": 0.0},
-    "힐링": {"non_res": 0.1, "ppltn": 0.1, "congest": -0.7, "gtoff": 0.0},
-    "맛집": {"non_res": 0.4, "ppltn": 0.5, "congest": -0.1, "gtoff": 0.0},
-    "데이트": {"non_res": 0.4, "ppltn": 0.0, "congest": -0.2, "gtoff": 0.4}
-}
-AGE_WEIGHTS = {
-    "10대": {"0" : 0.2, "10": 0.6, "20": 0.2},
-    "20대": {"10": 0.2, "20": 0.6, "30": 0.2},
-    "30대": {"20": 0.2, "30": 0.6, "40": 0.2},
-    "40대": {"30": 0.2, "40": 0.6, "50": 0.2},
-    "50대이상": {"40": 0.2, "50": 0.6, "60": 0.1, "70": 0.1}
-}
-GENDER_WEIGHTS = {
-    "남성": {"MALE": 0.7, "FEMALE": 0.1, "PPLTN": 0.2},
-    "여성": {"MALE": 0.1, "FEMALE": 0.7, "PPLTN": 0.2},
-    "무관": {"MALE": 0.0, "FEMALE": 0.0, "PPLTN": 1.0}
-}
-
-# --- 핵심 추천 로직 ---
-def get_final_recommendation(df, theme, age, gender):
-    result_df = df.copy()
-    
-    # 테마 점수
-    tw = THEME_WEIGHTS.get(theme, THEME_WEIGHTS["관광"])
-    result_df['THEME_TOTAL'] = (
-        (result_df['NON_RESNT_SCORE'] * tw.get('non_res', 0)) +
-        (result_df['PPLTN_SCORE'] * tw.get('ppltn', 0)) +
-        (result_df['CONGEST'] * tw.get('congest', 0)) +
-        (result_df['GTOFF_SCORE'] * tw.get('gtoff', 0))
-    )
-
-    # 연령대 점수
-    aw = AGE_WEIGHTS.get(age, {})
-    result_df['AGE_TOTAL'] = 0
-    for suffix, weight in aw.items():
-        col = f"PPLTN_RATE_{suffix}"
-        if col in result_df.columns:
-            result_df['AGE_TOTAL'] += result_df[col] * weight
-
-    # 성별 점수
-    gw = GENDER_WEIGHTS.get(gender, GENDER_WEIGHTS["무관"])
-    result_df['GENDER_TOTAL'] = (
-        (result_df['FEMALE_PPLTN_RATE'] * gw.get('FEMALE', 0)) +
-        (result_df['MALE_PPLTN_RATE'] * gw.get('MALE', 0))
-    )
-
-    result_df['FINAL_SCORE'] = result_df['THEME_TOTAL'] + result_df['AGE_TOTAL'] + result_df['GENDER_TOTAL']
-    return result_df.sort_values('FINAL_SCORE', ascending=False).head(2)
-
-#open ai연결
-async def get_ai_explanation(client, area_name, theme, age):
-    """추천된 장소에 대한 AI 요약 생성"""
-    try:
-        # AI에게 줄 미션(프롬프트)
-        prompt = (
-            f"당신은 서울 핫플레이스 가이드입니다. "
-            f"'{age}' 연령층이 '{theme}'를 목적으로 '{area_name}'을(를) 방문하려고 합니다. "
-            f"이 장소가 왜 이 사람에게 최고의 선택인지 딱 2줄로 친절하게 설명해주세요."
-        )
-        
-        response = client.chat.completions.create(
-            model="gpt-5.4-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"{area_name}은 현재 많은 분들이 찾고 있는 인기 지역입니다!"     #에러 발생했을 때
-
-
-# --- API 엔드포인트 ---
-@app.get("/recommend")
-async def recommend(theme: str, age: str, gender: str):
-    # 1. 키 로드 및 클라이언트 설정
-    keyPath = os.path.join(os.getcwd(), 'src', 'key.properties')
-    key_info = src.mylib.getKey(keyPath)
-    
-    # 서울시 키와 OpenAI 키를 각각 안전하게 가져옵니다
-    SEOUL_KEY = key_info['dataseoul']
-    client = OpenAI(api_key=key_info['openai_api_key'])
-    
-    AREA_LIST = [
+# ✅ 2. 데이터 리스트 (오타 방지를 위해 정확히 선언)
+STATION_LIST = [
         '가산디지털단지역', '강남역', '건대입구역', '고덕역', '고속터미널역',
         '교대역', '구로디지털단지역', '구로역', '군자역', '대림역',
         '동대문역', '뚝섬역', '미아사거리역', '발산역', '사당역',
@@ -166,37 +30,110 @@ async def recommend(theme: str, age: str, gender: str):
         '홍대입구역(2호선)', '회기역', '쌍문역', '신정네거리역',
         '잠실새내역', '잠실역', '시의회 앞', '숭례문'
     ]
-    
-    # 2. 데이터 수집 (KEY 변수 오류 수정)
-    rows = [fetchAreaData(SEOUL_KEY, area) for area in AREA_LIST]
-    df = pd.DataFrame([r for r in rows if r])
 
-    if df.empty: 
-        return {"error": "데이터를 불러올 수 없습니다."}
+PLACE_LIST = ["강남 MICE 관광특구", "동대문 관광특구", "명동 관광특구", "이태원 관광특구", "잠실 관광특구", "종로·청계 관광특구", "홍대 관광특구",
+             "경복궁", "광화문·덕수궁", "창덕궁·종묘", "가로수길", "노량진", "덕수궁길·정동길", "북촌한옥마을", "서촌", "성수카페거리",
+             "압구정로데오거리", "여의도", "연남동", "영등포 타임스퀘어", "용리단길", "인사동", "해방촌·경리단길", "DDP(동대문디자인플라자)",
+             "광화문광장", "국립중앙박물관·용산가족공원", "남산공원", "노들섬", "뚝섬한강공원", "망원한강공원", "반포한강공원",
+             "서울숲공원", "어린이대공원", "여의도한강공원", "잠실종합운동장", "북창동 먹자골목", "남대문시장", "익선동", "송리단길·호수단길", "올림픽공원"]
+    
+# 친구 로직용 장소 분류
+PLACE_TYPES = {
+    "실외": ["경복궁", "광화문광장", "남산공원", "서울숲공원", "덕수궁길·정동길", "북촌한옥마을", "창덕궁·종묘"],
+    "복합": ["강남 MICE 관광특구", "동대문 관광특구", "명동 관광특구", "이태원 관광특구", "잠실 관광특구", "홍대 관광특구", "가로수길", "성수카페거리", "압구정로데오거리", "용리단길", "인사동", "해방촌·경리단길", "익선동", "송리단길·호수단길", "서촌"],
+    "실내": ["노량진", "영등포 타임스퀘어", "DDP(동대문디자인플라자)", "국립중앙박물관·용산가족공원", "북창동 먹자골목", "남대문시장", "광화문·덕수궁", "연남동", "잠실종합운동장", "여의도"]
+}
 
-    # 3. 실시간 정규화 및 점수 계산
-    df['PPLTN_AVG'] = (df['AREA_PPLTN_MIN'] + df['AREA_PPLTN_MAX']) / 2
-    
-    def normalize(series):
-        diff = series.max() - series.min()
-        return (series - series.min()) / diff * 100 if diff != 0 else 0
+# ✅ 오류가 났던 부분 수정: 이중 loop를 사용하여 TYPE_MAP 생성
+TYPE_MAP = {name: t for t, names in PLACE_TYPES.items() for name in names}
 
-    df['PPLTN_SCORE'] = normalize(df['PPLTN_AVG'])
-    df['GTOFF_SCORE'] = normalize(df['GTOFF_AVG'])
-    df['NON_RESNT_SCORE'] = normalize(df['NON_RESNT_PPLTN_RATE'])
-    
-    congest_map = {'여유': 0, '보통': 33, '약간 붐빔': 66, '붐빔': 100}
-    df['CONGEST'] = df['AREA_CONGEST_LVL'].map(congest_map)
+# ✅ 3. 데이터 수집 함수 (JSON 방식)
+def fetch_seoul_data(api_key, area_nm):
+    url = f'http://openapi.seoul.go.kr:8088/{api_key}/json/citydata/1/1/{area_nm}'
+    try:
+        res = requests.get(url, timeout=5).json()
+        root = res.get('CITYDATA')
+        if not root: return None
+        ppl = root.get('LIVE_PPLTN_STTS', [{}])[0]
+        weather = root.get('WEATHER_STTS', [{}])[0]
+        return {
+            'AREA_NM': area_nm,
+            'AREA_CONGEST_LVL': ppl.get('AREA_CONGEST_LVL', ''),
+            'AREA_CONGEST_MSG': ppl.get('AREA_CONGEST_MSG', ''),
+            'NON_RESNT_PPLTN_RATE': float(ppl.get('NON_RESNT_PPLTN_RATE', 0)),
+            'MALE_PPLTN_RATE': float(ppl.get('MALE_PPLTN_RATE', 0)),
+            'PPLTN_RATE_10': float(ppl.get('PPLTN_RATE_10', 0)),
+            'PPLTN_RATE_20': float(ppl.get('PPLTN_RATE_20', 0)),
+            'PPLTN_RATE_30': float(ppl.get('PPLTN_RATE_30', 0)),
+            'PPLTN_RATE_40': float(ppl.get('PPLTN_RATE_40', 0)),
+            'PPLTN_RATE_50': float(ppl.get('PPLTN_RATE_50', 0)),
+            'PM10': float(weather.get('PM10', 0))
+        }
+    except: return None
 
-    # 4. 최종 추천 실행
-    result = get_final_recommendation(df, theme, age, gender)
+# ✅ 4. 사용자/친구 로직 함수 분리
+def calculate_user_score(row, age_col):
+    # 사용자님 기존 가중치 유지
+    return round((row['NON_RESNT_PPLTN_RATE'] * 0.4) + (row[age_col] * 0.6), 2)
+
+def calculate_friend_score(row):
+    # 친구분 로직 수치 유지 (0.4 / 0.3 / 0.2)
+    score = (row['NON_RESNT_PPLTN_RATE'] * 0.4 + row['PPLTN_RATE_30'] * 0.3 + row['MALE_PPLTN_RATE'] * 0.2)
     
-    # 5. AI 한줄평 생성 (1위 장소 대상)
-    top_place_name = result.iloc[0]['AREA_NM']
-    ai_summary = await get_ai_explanation(client, top_place_name, theme, age)
+    congest = row['AREA_CONGEST_LVL']
+    if congest == '약간 붐빔': score -= 15
+    elif congest == '붐빔': score -= 25
+    elif congest == '매우 붐빔': score -= 50
     
-    # 6. 결과 반환
+    pm10 = row['PM10']
+    weather_msg = row['AREA_CONGEST_MSG']
+    is_raining = '비' in weather_msg or '눈' in weather_msg
+    p_type = TYPE_MAP.get(row['AREA_NM'], "복합")
+
+    if is_raining:
+        if p_type == "실외": score = 0
+        elif p_type == "복합": score *= 0.2
+    elif pm10 >= 80:
+        if p_type == "실외": score -= 20
+        elif p_type == "복합": score -= 10
+    return round(max(0, score), 2)
+
+# ✅ 5. API 엔드포인트
+@app.get("/recommend")
+async def recommend(theme: str, age: str, gender: str):
+    key_info = src.mylib.getKey(os.path.join(os.getcwd(), 'src', 'key.properties'))
+    SEOUL_KEY = key_info['dataseoul']
+    client = OpenAI(api_key=key_info['openai_api_key'])
+    
+    age_col = {"10대": "PPLTN_RATE_10", "20대": "PPLTN_RATE_20", "30대": "PPLTN_RATE_30", "40대": "PPLTN_RATE_40"}.get(age, "PPLTN_RATE_20")
+
+    # 역 데이터 수집 및 사용자 로직 적용
+    station_data = [fetch_seoul_data(SEOUL_KEY, s_name) for s_name in STATION_LIST]
+    df_stations = pd.DataFrame([r for r in station_data if r])
+    df_stations['FINAL_SCORE'] = df_stations.apply(lambda r: calculate_user_score(r, age_col), axis=1)
+    top_3_stations = df_stations.sort_values('FINAL_SCORE', ascending=False).head(3)
+
+    # 장소 데이터 수집 및 친구 로직 적용
+    place_data = [fetch_seoul_data(SEOUL_KEY, p_name) for p_name in PLACE_LIST]
+    df_places = pd.DataFrame([r for r in place_data if r])
+    df_places['FINAL_SCORE'] = df_places.apply(calculate_friend_score, axis=1)
+    top_3_places = df_places.sort_values('FINAL_SCORE', ascending=False).head(3)
+
+    # 결과 합치기 (역 3 + 장소 3)
+    final_result = pd.concat([top_3_stations, top_3_places])
+
+    # ✅ AI 요약 1: 역 1위 (첫 번째 데이터)
+    top_station = top_3_stations.iloc[0]
+    prompt_s = f"{age} {gender}에게 '{theme}'를 위한 역 추천 1위 '{top_station['AREA_NM']}'의 추천 이유를 2줄로 써줘."
+    res_s = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_s}])
+    
+    # ✅ AI 요약 2: 장소 1위 (네 번째 데이터 - index 3)
+    top_place = top_3_places.iloc[0]
+    prompt_p = f"{age} {gender}에게 '{theme}'를 위한 장소 추천 1위 '{top_place['AREA_NM']}'의 추천 이유를 2줄로 써줘."
+    res_p = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_p}])
+
     return {
-        "top_place_summary": ai_summary,
-        "recommendations": result[['AREA_NM', 'FINAL_SCORE']].to_dict(orient="records")
+        "top_station_summary": res_s.choices[0].message.content,
+        "top_place_summary": res_p.choices[0].message.content,
+        "recommendations": final_result[['AREA_NM', 'FINAL_SCORE', 'AREA_CONGEST_LVL']].to_dict(orient="records")
     }
