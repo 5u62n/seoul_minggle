@@ -4,6 +4,9 @@ import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
 
 app = FastAPI()
 
@@ -15,6 +18,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 루트 경로 → index.html 서빙
+@app.get("/")
+async def root():
+    return FileResponse("index.html")
 
 # ✅ 2. 데이터 리스트 (오타 방지를 위해 정확히 선언)
 STATION_LIST = [
