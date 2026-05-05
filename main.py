@@ -55,11 +55,14 @@ PLACE_TYPES = {
 TYPE_MAP = {name: t for t, names in PLACE_TYPES.items() for name in names}
 
 # ✅ 3. 데이터 수집 함수 (JSON 방식)
-def fetch_seoul_data(api_key, area_nm):
+import asyncio
+import httpx
+
+async def fetch_seoul_data_async(client, api_key, area_nm):
     url = f'http://openapi.seoul.go.kr:8088/{api_key}/json/citydata/1/1/{area_nm}'
     try:
-        res = requests.get(url, timeout=5).json()
-        root = res.get('CITYDATA')
+        res = await client.get(url, timeout=5)
+        root = res.json().get('CITYDATA')
         if not root: return None
         ppl = root.get('LIVE_PPLTN_STTS', [{}])[0]
         weather = root.get('WEATHER_STTS', [{}])[0]
@@ -76,96 +79,59 @@ def fetch_seoul_data(api_key, area_nm):
             'PPLTN_RATE_50': float(ppl.get('PPLTN_RATE_50', 0)),
             'PM10': float(weather.get('PM10', 0))
         }
-    except: return None
+    except:
+        return None
 
-# ✅ 4. 사용자/친구 로직 함수 분리
-def calculate_user_score(row, age_col):
-    # 사용자님 기존 가중치 유지
-    return round((row['NON_RESNT_PPLTN_RATE'] * 0.4) + (row[age_col] * 0.6), 2)
-
-def calculate_friend_score(row):
-    # 친구분 로직 수치 유지 (0.4 / 0.3 / 0.2)
-    score = (row['NON_RESNT_PPLTN_RATE'] * 0.4 + row['PPLTN_RATE_30'] * 0.3 + row['MALE_PPLTN_RATE'] * 0.2)
-    
-    congest = row['AREA_CONGEST_LVL']
-    if congest == '약간 붐빔': score -= 15
-    elif congest == '붐빔': score -= 25
-    elif congest == '매우 붐빔': score -= 50
-    
-    pm10 = row['PM10']
-    weather_msg = row['AREA_CONGEST_MSG']
-    is_raining = '비' in weather_msg or '눈' in weather_msg
-    p_type = TYPE_MAP.get(row['AREA_NM'], "복합")
-
-    if is_raining:
-        if p_type == "실외": score = 0
-        elif p_type == "복합": score *= 0.2
-    elif pm10 >= 80:
-        if p_type == "실외": score -= 20
-        elif p_type == "복합": score -= 10
-    return round(max(0, score), 2)
-
-# ✅ 5. API 엔드포인트
-# ✅ 5. API 엔드포인트
 @app.get("/recommend")
 async def recommend(theme: str, age: str, gender: str):
-    # 1. 환경 변수에서 키 가져오기 (정상)
     SEOUL_KEY = os.environ.get('dataseoul')
     openai_key = os.environ.get('openai_api_key')
-    
-    # 2. 키가 없을 경우를 대비한 방어 로직
     if not SEOUL_KEY or not openai_key:
-        return {"error": "API 키 설정이 누락되었습니다. Render의 Environment 설정을 확인하세요."}
-    
+        return {"error": "API 키 설정 누락"}
+
     client = OpenAI(api_key=openai_key)
-    
     age_col = {"10대": "PPLTN_RATE_10", "20대": "PPLTN_RATE_20", "30대": "PPLTN_RATE_30", "40대": "PPLTN_RATE_40"}.get(age, "PPLTN_RATE_20")
 
-    # 3. 데이터 수집 및 예외 처리 (매우 중요)
-    station_data = [fetch_seoul_data(SEOUL_KEY, s_name) for s_name in STATION_LIST]
-    valid_data = [r for r in station_data if r]
-    
-    # 데이터가 하나도 수집되지 않았을 경우 에러 방지
-    if not valid_data:
-        return {"error": "서울시 데이터 수집에 실패했습니다. API 키나 네트워크를 확인하세요."}
-        
-    df_stations = pd.DataFrame(valid_data)
+    # ✅ 병렬 호출
+    async with httpx.AsyncClient() as http:
+        station_tasks = [fetch_seoul_data_async(http, SEOUL_KEY, s) for s in STATION_LIST]
+        place_tasks   = [fetch_seoul_data_async(http, SEOUL_KEY, p) for p in PLACE_LIST]
+        all_results   = await asyncio.gather(*station_tasks, *place_tasks)
+
+    station_data = [r for r in all_results[:len(STATION_LIST)] if r]
+    place_data   = [r for r in all_results[len(STATION_LIST):] if r]
+
+    if not station_data:
+        return {"error": "서울시 데이터 수집 실패"}
+
+    df_stations = pd.DataFrame(station_data)
     df_stations['FINAL_SCORE'] = df_stations.apply(lambda r: calculate_user_score(r, age_col), axis=1)
     top_3_stations = df_stations.sort_values('FINAL_SCORE', ascending=False).head(3)
-    
-    # ... 이후 AI 요약 부분에 아까 드린 try-except 구문을 적용하세요.
 
-    # 장소 데이터 수집 및 친구 로직 적용
-    place_data = [fetch_seoul_data(SEOUL_KEY, p_name) for p_name in PLACE_LIST]
-    df_places = pd.DataFrame([r for r in place_data if r])
+    df_places = pd.DataFrame(place_data)
     df_places['FINAL_SCORE'] = df_places.apply(calculate_friend_score, axis=1)
     top_3_places = df_places.sort_values('FINAL_SCORE', ascending=False).head(3)
 
-    # 결과 합치기 (역 3 + 장소 3)
-    final_result = pd.concat([top_3_stations, top_3_places])
-
-    # ✅ AI 요약 1: 역 추천 이유
+    # AI 요약 (기존 코드 그대로)
     try:
         top_station = top_3_stations.iloc[0]
         prompt_s = f"{age} {gender}에게 '{theme}'를 위한 역 추천 1위 '{top_station['AREA_NM']}'의 추천 이유를 2줄로 써줘."
         res_s = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_s}])
         station_summary = res_s.choices[0].message.content
     except Exception as e:
-        print(f"AI Station Summary Error: {e}")
-        station_summary = "역 추천 요약을 가져오지 못했습니다. (API 키 또는 연결 확인 필요)"
+        station_summary = "역 추천 요약을 가져오지 못했습니다."
 
-    # ✅ AI 요약 2: 장소 추천 이유
     try:
         top_place = top_3_places.iloc[0]
         prompt_p = f"{age} {gender}에게 '{theme}'를 위한 장소 추천 1위 '{top_place['AREA_NM']}'의 추천 이유를 2줄로 써줘."
         res_p = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_p}])
         place_summary = res_p.choices[0].message.content
     except Exception as e:
-        print(f"AI Place Summary Error: {e}")
-        place_summary = "장소 추천 요약을 가져오지 못했습니다. (API 키 또는 연결 확인 필요)"
-   # 함수의 맨 마지막 return 부분을 이렇게 수정하세요
+        place_summary = "장소 추천 요약을 가져오지 못했습니다."
+
+    final_result = pd.concat([top_3_stations, top_3_places])
     return {
-        "top_station_summary": station_summary,  # res_s 대신 요약 변수 사용
-        "top_place_summary": place_summary,      # res_p 대신 요약 변수 사용
+        "top_station_summary": station_summary,
+        "top_place_summary": place_summary,
         "recommendations": final_result[['AREA_NM', 'FINAL_SCORE', 'AREA_CONGEST_LVL']].to_dict(orient="records")
     }
