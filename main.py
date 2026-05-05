@@ -155,8 +155,9 @@ async def recommend(theme: str, age: str, gender: str):
     except Exception as e:
         print(f"AI Place Summary Error: {e}")
         place_summary = "장소 추천 요약을 가져오지 못했습니다. (API 키 또는 연결 확인 필요)"
+   # 함수의 맨 마지막 return 부분을 이렇게 수정하세요
     return {
-        "top_station_summary": res_s.choices[0].message.content,
-        "top_place_summary": res_p.choices[0].message.content,
+        "top_station_summary": station_summary,  # res_s 대신 요약 변수 사용
+        "top_place_summary": place_summary,      # res_p 대신 요약 변수 사용
         "recommendations": final_result[['AREA_NM', 'FINAL_SCORE', 'AREA_CONGEST_LVL']].to_dict(orient="records")
     }
