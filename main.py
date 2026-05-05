@@ -6,6 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+import asyncio
+import httpx
+
 
 
 app = FastAPI()
@@ -55,8 +58,6 @@ PLACE_TYPES = {
 TYPE_MAP = {name: t for t, names in PLACE_TYPES.items() for name in names}
 
 # ✅ 3. 데이터 수집 함수 (JSON 방식)
-import asyncio
-import httpx
 
 async def fetch_seoul_data_async(client, api_key, area_nm):
     url = f'http://openapi.seoul.go.kr:8088/{api_key}/json/citydata/1/1/{area_nm}'
