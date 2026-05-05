@@ -143,6 +143,7 @@ async def recommend(theme: str, age: str, gender: str):
         res_s = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_s}])
         station_summary = res_s.choices[0].message.content
     except Exception as e:
+        traceback.print_exc()  # ← 이거 추가
         station_summary = "역 추천 요약을 가져오지 못했습니다."
 
     try:
@@ -151,6 +152,7 @@ async def recommend(theme: str, age: str, gender: str):
         res_p = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt_p}])
         place_summary = res_p.choices[0].message.content
     except Exception as e:
+        traceback.print_exc()  # ← 이거 추가
         place_summary = "장소 추천 요약을 가져오지 못했습니다."
 
     final_result = pd.concat([top_3_stations, top_3_places])
