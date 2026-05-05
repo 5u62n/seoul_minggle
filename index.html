@@ -532,22 +532,6 @@
     });
   }
 
-  // ── 마커 및 팝업 ──
-  
-    items.forEach((item, idx) => {
-      ps.keywordSearch(item.AREA_NM, (result, status) => {
-        if (status === kakao.maps.services.Status.OK) {
-          const pos = new kakao.maps.LatLng(result[0].y, result[0].x);
-          const marker = new kakao.maps.Marker({
-            position: pos,
-            map: map,
-            image: type === 'station' ? null : null // 기본 마커 사용
-          });
-          kakao.maps.event.addListener(marker, 'click', () => openPopup(item, type, idx));
-          markers.push(marker);
-        }
-      });
-    });
   
 function placeMarkers(type, items) {
   const isStation = (type === 'station');
