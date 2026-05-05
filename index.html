@@ -621,7 +621,13 @@ function placeMarkers(type, items) {
     card.classList.add('show');
   }
 
-  function clearMarkers() { markers.forEach(m => m.setMap(null)); markers = []; }
+  function clearMarkers() {
+    markers.forEach(m => {
+        if (m.type === 'overlay') m.overlay.setMap(null);
+        else m.setMap(null);
+    });
+    markers = [];
+}
   function closePopup() { document.getElementById('popupCard').classList.remove('show'); }
   function showLoading(show) { document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none'; }
   function moveToPlace(name) {
