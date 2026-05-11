@@ -102,7 +102,8 @@ async def fetch_seoul_data_async(client, api_key, area_nm):
             'PPLTN_RATE_50': float(ppl.get('PPLTN_RATE_50', 0)),
             'PM10': float(weather.get('PM10', 0))
         }
-    except:
+    except Exception as e:
+        print(f"[ERROR] {area_nm}: {type(e).__name__}: {e}")
         return None
 
 # ✅ 5. API 엔드포인트
