@@ -84,7 +84,7 @@ def calculate_friend_score(row):
 async def fetch_seoul_data_async(client, api_key, area_nm):
     url = f'http://openapi.seoul.go.kr:8088/{api_key}/json/citydata/1/1/{area_nm}'
     try:
-        res = await client.get(url, timeout=15)
+        res = await client.get(url, timeout=20)
         root = res.json().get('CITYDATA')
         if not root: return None
         ppl = root.get('LIVE_PPLTN_STTS', [{}])[0]
